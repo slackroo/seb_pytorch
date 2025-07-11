@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.11"
 dependencies = [
+    "gitpython>=3.1.44",
     "notebook>=7.4.4",
+    "numpy==1.26",
+    "pandas-stubs==2.3.0.250703",
     "pip>=25.1.1",
+    "tqdm>=4.67.1",
 ]
