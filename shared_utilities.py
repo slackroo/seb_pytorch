@@ -1,7 +1,15 @@
+import lightning as L
 import torch
-from torch.utils.data import DataLoader
+import torch.nn.functional as F
+import torchmetrics
+from torch.nn import functional as F
+from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.dataset import random_split
 from torchvision import datasets, transforms
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+import numpy as np
+import pandas as pd
 
 
 class PyTorchMLP(torch.nn.Module):
@@ -10,13 +18,13 @@ class PyTorchMLP(torch.nn.Module):
 
         self.all_layers = torch.nn.Sequential(
             # 1st hidden layer
-            torch.nn.Linear(num_features, 50),
+            torch.nn.Linear(num_features, 100),
             torch.nn.ReLU(),
             # 2nd hidden layer
-            torch.nn.Linear(50, 25),
+            torch.nn.Linear(100, 50),
             torch.nn.ReLU(),
             # output layer
-            torch.nn.Linear(25, num_classes),
+            torch.nn.Linear(50, num_classes),
         )
 
     def forward(self, x):
@@ -27,14 +35,15 @@ class PyTorchMLP(torch.nn.Module):
 
 def get_dataset_loaders():
     train_dataset = datasets.MNIST(
-        root="./mnist", train=True, transform=transforms.ToTensor(), download=True
+        root="./assets/mnist", train=True, transform=transforms.ToTensor(), download=True
     )
 
     test_dataset = datasets.MNIST(
-        root="./mnist", train=False, transform=transforms.ToTensor()
+        root="./assets/mnist", train=False, transform=transforms.ToTensor()
     )
 
-    train_dataset, val_dataset = random_split(train_dataset, lengths=[55000, 5000], generator=torch.Generator().manual_seed(42))
+    train_dataset, val_dataset = random_split(train_dataset, lengths=[55000, 5000],
+                                              generator=torch.Generator().manual_seed(42))
 
     train_loader = DataLoader(
         dataset=train_dataset,
@@ -61,7 +70,6 @@ def get_dataset_loaders():
 
 
 def compute_accuracy(model, dataloader, device=None):
-
     if device is None:
         device = torch.device("cpu")
     model = model.eval()
@@ -70,7 +78,6 @@ def compute_accuracy(model, dataloader, device=None):
     total_examples = 0
 
     for idx, (features, labels) in enumerate(dataloader):
-
         features, labels = features.to(device), labels.to(device)
 
         with torch.no_grad():
@@ -83,3 +90,191 @@ def compute_accuracy(model, dataloader, device=None):
         total_examples += len(compare)
 
     return correct / total_examples
+
+
+class MNISTDataModule(L.LightningDataModule):
+    def __init__(self, data_dir="./mnist", batch_size=64):
+        super().__init__()
+
+        # attributes we save and access diring calls
+        self.data_dir = data_dir
+        self.batch_size = batch_size
+
+    def prepare_data(self):
+        # download
+        datasets.MNIST(self.data_dir, train=True, download=True)
+        datasets.MNIST(self.data_dir, train=False, download=True)
+
+    def setup(self, stage: str):
+        # access the train, val, test and predict data for Multi GPU processing
+
+        self.mnist_test = datasets.MNIST(
+            self.data_dir, transform=transforms.ToTensor(), train=False
+        )
+        self.mnist_predict = datasets.MNIST(
+            self.data_dir, transform=transforms.ToTensor(), train=False
+        )
+        mnist_full = datasets.MNIST(
+            self.data_dir, transform=transforms.ToTensor(), train=True
+        )
+        self.mnist_train, self.mnist_val = random_split(mnist_full, [55000, 5000],
+                                                        generator=torch.Generator().manual_seed(42))
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.mnist_train, batch_size=self.batch_size, shuffle=True, drop_last=True
+        )
+
+    def val_dataloader(self):
+        return DataLoader(self.mnist_val, batch_size=self.batch_size, shuffle=False)
+
+    def test_dataloader(self):
+        return DataLoader(self.mnist_test, batch_size=self.batch_size, shuffle=False)
+
+    def predict_dataloader(self):
+        return DataLoader(self.mnist_predict, batch_size=self.batch_size, shuffle=False)
+
+
+class LightningModel(L.LightningModule):
+    def __init__(self, model, learning_rate):
+        super().__init__()
+        self.model = model
+        self.learning_rate = learning_rate
+
+        # save settings and hhyperparams to the log dir
+        # but skip the model parameters
+        self.save_hyperparameters(ignore=['model'])
+
+        self.train_acc = torchmetrics.Accuracy(task="multiclass", num_classes=2)
+        self.val_acc = torchmetrics.Accuracy(task="multiclass", num_classes=2)
+        self.test_acc = torchmetrics.Accuracy(task="multiclass", num_classes=2)
+
+    def forward(self, x):
+        return self.model(x)
+
+    # Shared step that is used in
+    # training step, val step, and test step
+
+    def _shared_step(self, batch):
+        features, true_labels = batch
+        logits = self(features)
+        loss = F.cross_entropy(logits, true_labels)
+        predicted_labels = torch.argmax(logits, dim=1)
+        return loss, true_labels, predicted_labels
+
+    def training_step(self, batch, batch_idx):
+        loss, true_labels, predicted_labels = self._shared_step(batch)
+        self.log("train_loss", loss)
+
+        self.train_acc(predicted_labels, true_labels)
+        self.log(
+            "train_acc", self.train_acc, prog_bar=True, on_epoch=True, on_step=False
+        )
+
+        return loss  # This is passed to optimizer for training
+
+    def validation_step(self, batch, batch_idx):
+        loss, true_labels, predicted_labels = self._shared_step(batch)
+        self.log("val_loss", loss, prog_bar=True)
+        self.val_acc(predicted_labels, true_labels)
+        self.log("va_acc", self.val_acc, prog_bar=True)
+
+    def test_step(self, batch, batch_idx):
+        loss, true_labels, predicted_labels = self._shared_step(batch)
+        self.test_acc(predicted_labels, true_labels)
+        self.log("test_acc", self.test_acc)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.SGD(self.parameters(), lr=self.learning_rate)
+        return optimizer
+
+
+class CustomDataset(Dataset):
+    def __init__(self, feature_array, label_array, transform=None):
+
+        self.x = feature_array
+        self.y = label_array
+        self.transform = transform
+
+    def __getitem__(self, index):
+        x = self.x[index]
+        y = self.y[index]
+
+        if self.transform is not None:
+            x = self.transform(x)
+
+        return x, y
+
+    def __len__(self):
+        return self.y.shape[0]
+
+
+class CustomDataModule(L.LightningDataModule):
+    def __init__(self, data_dir="./mnist", batch_size=64):
+        super().__init__()
+        self.data_dir = data_dir
+        self.batch_size = batch_size
+
+    def prepare_data(self):
+        # download
+        pass
+
+    def setup(self, stage: str):
+
+        X, y = make_classification(
+            n_samples=20000,
+            n_features=100,
+            n_informative=10,
+            n_redundant=40,
+            n_repeated=25,
+            n_clusters_per_class=5,
+            flip_y=0.05,
+            class_sep=0.5,
+            random_state=123,
+        )
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=1, shuffle=True
+        )
+
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_train, y_train, test_size=0.1, random_state=1, shuffle=True
+        )
+
+        self.train_dataset = CustomDataset(
+            feature_array=X_train.astype(np.float32),
+            label_array=y_train.astype(np.int64),
+        )
+
+        self.val_dataset = CustomDataset(
+            feature_array=X_val.astype(np.float32), label_array=y_val.astype(np.int64)
+        )
+
+        self.test_dataset = CustomDataset(
+            feature_array=X_test.astype(np.float32), label_array=y_test.astype(np.int64)
+        )
+
+    def train_dataloader(self):
+        train_loader = DataLoader(
+            dataset=self.train_dataset,
+            batch_size=32,
+            shuffle=True,
+            drop_last=True,
+            num_workers=0,
+        )
+        return train_loader
+
+    def val_dataloader(self):
+        val_loader = DataLoader(
+            dataset=self.val_dataset,
+            batch_size=32,
+            shuffle=False,
+            num_workers=0,
+        )
+        return val_loader
+
+    def test_dataloader(self):
+        test_loader = DataLoader(
+            dataset=self.test_dataset, batch_size=32, shuffle=False, num_workers=0
+        )
+        return test_loader
