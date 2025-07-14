@@ -33,6 +33,27 @@ class PyTorchMLP(torch.nn.Module):
         return logits
 
 
+class PyTorchMLP2(torch.nn.Module):
+    def __init__(self, num_features, hidden_units, num_classes):
+        super().__init__()
+
+        all_layers = []
+        for hidden_unit in hidden_units:
+            layer = torch.nn.Linear(num_features, hidden_unit)
+            all_layers.append(layer)
+            all_layers.append(torch.nn.ReLU())
+            num_features = hidden_unit
+        output_layer = torch.nn.Linear(hidden_units[-1], num_classes)
+        all_layers.append(output_layer)
+
+        self.layers = torch.nn.Sequential(*all_layers)
+
+    def forward(self, x):
+        x = torch.flatten(x, start_dim=1)
+        logits = self.layers(x)
+        return logits
+
+
 def get_dataset_loaders():
     train_dataset = datasets.MNIST(
         root="./assets/mnist", train=True, transform=transforms.ToTensor(), download=True
@@ -177,7 +198,69 @@ class LightningModel(L.LightningModule):
         loss, true_labels, predicted_labels = self._shared_step(batch)
         self.log("val_loss", loss, prog_bar=True)
         self.val_acc(predicted_labels, true_labels)
-        self.log("va_acc", self.val_acc, prog_bar=True)
+        self.log("val_acc", self.val_acc, prog_bar=True)
+
+    def test_step(self, batch, batch_idx):
+        loss, true_labels, predicted_labels = self._shared_step(batch)
+        self.test_acc(predicted_labels, true_labels)
+        self.log("test_acc", self.test_acc)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.SGD(self.parameters(), lr=self.learning_rate)
+        return optimizer
+
+
+class LightningModel2(L.LightningModule):
+    def __init__(self, pytorch_model=None, hidden_units=None, learning_rate=None):
+        super().__init__()
+        self.learning_rate = learning_rate
+        if pytorch_model is None:
+            self.model = PyTorchMLP2(num_features=100,hidden_units=hidden_units, num_classes=2)
+        else:
+            self.model = pytorch_model
+
+        if hidden_units is None:
+            hidden_units = [100, 50]
+
+        self.hidden_units = hidden_units
+
+        # save settings and hhyperparams to the log dir
+        # but skip the model parameters
+        self.save_hyperparameters(ignore=['model'])
+
+        self.train_acc = torchmetrics.Accuracy(task="multiclass", num_classes=2)
+        self.val_acc = torchmetrics.Accuracy(task="multiclass", num_classes=2)
+        self.test_acc = torchmetrics.Accuracy(task="multiclass", num_classes=2)
+
+    def forward(self, x):
+        return self.model(x)
+
+    # Shared step that is used in
+    # training step, val step, and test step
+
+    def _shared_step(self, batch):
+        features, true_labels = batch
+        logits = self(features)
+        loss = F.cross_entropy(logits, true_labels)
+        predicted_labels = torch.argmax(logits, dim=1)
+        return loss, true_labels, predicted_labels
+
+    def training_step(self, batch, batch_idx):
+        loss, true_labels, predicted_labels = self._shared_step(batch)
+        self.log("train_loss", loss)
+
+        self.train_acc(predicted_labels, true_labels)
+        self.log(
+            "train_acc", self.train_acc, prog_bar=True, on_epoch=True, on_step=False
+        )
+
+        return loss  # This is passed to optimizer for training
+
+    def validation_step(self, batch, batch_idx):
+        loss, true_labels, predicted_labels = self._shared_step(batch)
+        self.log("val_loss", loss, prog_bar=True)
+        self.val_acc(predicted_labels, true_labels)
+        self.log("val_acc", self.val_acc, prog_bar=True)
 
     def test_step(self, batch, batch_idx):
         loss, true_labels, predicted_labels = self._shared_step(batch)
@@ -191,7 +274,6 @@ class LightningModel(L.LightningModule):
 
 class CustomDataset(Dataset):
     def __init__(self, feature_array, label_array, transform=None):
-
         self.x = feature_array
         self.y = label_array
         self.transform = transform
@@ -220,7 +302,6 @@ class CustomDataModule(L.LightningDataModule):
         pass
 
     def setup(self, stage: str):
-
         X, y = make_classification(
             n_samples=20000,
             n_features=100,
