@@ -19,9 +19,11 @@ class PyTorchMLP(torch.nn.Module):
         self.all_layers = torch.nn.Sequential(
             # 1st hidden layer
             torch.nn.Linear(num_features, 100),
+            torch.nn.BatchNorm1d(100),
             torch.nn.ReLU(),
             # 2nd hidden layer
             torch.nn.Linear(100, 50),
+            torch.nn.BatchNorm1d(50),
             torch.nn.ReLU(),
             # output layer
             torch.nn.Linear(50, num_classes),
