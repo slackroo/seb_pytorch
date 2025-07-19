@@ -1,6 +1,5 @@
 import lightning as L
 import torch
-import torch.nn.functional as F
 import torchmetrics
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
@@ -10,6 +9,7 @@ from sklearn.datasets import make_classification
 from sklearn.model_selection import train_test_split
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
 
 class PyTorchMLP(torch.nn.Module):
@@ -116,11 +116,12 @@ def compute_accuracy(model, dataloader, device=None):
 
 
 class MNISTDataModule(L.LightningDataModule):
-    def __init__(self, data_dir="./mnist", batch_size=64):
+    def __init__(self, data_dir="./assets/mnist", batch_size=64, num_workers=0):
         super().__init__()
 
         # attributes we save and access diring calls
         self.data_dir = data_dir
+        self.num_workers = num_workers
         self.batch_size = batch_size
 
     def prepare_data(self):
@@ -128,38 +129,60 @@ class MNISTDataModule(L.LightningDataModule):
         datasets.MNIST(self.data_dir, train=True, download=True)
         datasets.MNIST(self.data_dir, train=False, download=True)
 
-    def setup(self, stage: str):
+    def setup(self, stage: str = None):
         # access the train, val, test and predict data for Multi GPU processing
 
         self.mnist_test = datasets.MNIST(
-            self.data_dir, transform=transforms.ToTensor(), train=False
+            root=self.data_dir,
+            transform=transforms.ToTensor(),
+            train=False
         )
         self.mnist_predict = datasets.MNIST(
-            self.data_dir, transform=transforms.ToTensor(), train=False
+            self.data_dir,
+            transform=transforms.ToTensor(),
+            train=False
         )
         mnist_full = datasets.MNIST(
-            self.data_dir, transform=transforms.ToTensor(), train=True
+            self.data_dir,
+            transform=transforms.ToTensor(),
+            train=True
         )
-        self.mnist_train, self.mnist_val = random_split(mnist_full, [55000, 5000],
-                                                        generator=torch.Generator().manual_seed(42))
+        self.mnist_train, self.mnist_val = random_split(
+            mnist_full, [55000, 5000],
+            generator=torch.Generator().manual_seed(42)
+        )
 
     def train_dataloader(self):
         return DataLoader(
-            self.mnist_train, batch_size=self.batch_size, shuffle=True, drop_last=True
+            self.mnist_train,
+            batch_size=self.batch_size,
+            shuffle=True,
+            drop_last=True,
+            num_workers=self.num_workers,
+
         )
 
     def val_dataloader(self):
-        return DataLoader(self.mnist_val, batch_size=self.batch_size, shuffle=False)
+        return DataLoader(self.mnist_val,
+                          batch_size=self.batch_size,
+                          shuffle=False,
+                          num_workers=self.num_workers)
 
     def test_dataloader(self):
-        return DataLoader(self.mnist_test, batch_size=self.batch_size, shuffle=False)
+        return DataLoader(self.mnist_test,
+                          batch_size=self.batch_size,
+                          shuffle=False,
+                          num_workers=self.num_workers)
 
     def predict_dataloader(self):
-        return DataLoader(self.mnist_predict, batch_size=self.batch_size, shuffle=False)
+        return DataLoader(self.mnist_predict,
+                          batch_size=self.batch_size,
+                          shuffle=False,
+                          num_workers=self.num_workers)
 
 
 class LightningModel(L.LightningModule):
-    def __init__(self, model, learning_rate):
+    def __init__(self, model, learning_rate, num_classes=2):
         super().__init__()
         self.model = model
         self.learning_rate = learning_rate
@@ -168,9 +191,9 @@ class LightningModel(L.LightningModule):
         # but skip the model parameters
         self.save_hyperparameters(ignore=['model'])
 
-        self.train_acc = torchmetrics.Accuracy(task="multiclass", num_classes=2)
-        self.val_acc = torchmetrics.Accuracy(task="multiclass", num_classes=2)
-        self.test_acc = torchmetrics.Accuracy(task="multiclass", num_classes=2)
+        self.train_acc = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes)
+        self.val_acc = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes)
+        self.test_acc = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes)
 
     def forward(self, x):
         return self.model(x)
@@ -217,7 +240,7 @@ class LightningModel2(L.LightningModule):
         super().__init__()
         self.learning_rate = learning_rate
         if pytorch_model is None:
-            self.model = PyTorchMLP2(num_features=100,hidden_units=hidden_units, num_classes=2)
+            self.model = PyTorchMLP2(num_features=100, hidden_units=hidden_units, num_classes=2)
         else:
             self.model = pytorch_model
 
@@ -361,3 +384,33 @@ class CustomDataModule(L.LightningDataModule):
             dataset=self.test_dataset, batch_size=32, shuffle=False, num_workers=0
         )
         return test_loader
+
+
+def plot_loss_and_acc(
+        log_dir, loss_ylim=(0.0, 0.9), acc_ylim=(0.7, 1.0), save_loss=None, save_acc=None
+):
+    metrics = pd.read_csv(f"{log_dir}/metrics.csv")
+
+    aggreg_metrics = []
+    agg_col = "epoch"
+    for i, dfg in metrics.groupby(agg_col):
+        agg = dict(dfg.mean())
+        agg[agg_col] = i
+        aggreg_metrics.append(agg)
+
+    df_metrics = pd.DataFrame(aggreg_metrics)
+    df_metrics[["train_loss", "val_loss"]].plot(
+        grid=True, legend=True, xlabel="Epoch", ylabel="Loss"
+    )
+
+    plt.ylim(loss_ylim)
+    if save_loss is not None:
+        plt.savefig(save_loss)
+
+    df_metrics[["train_acc", "val_acc"]].plot(
+        grid=True, legend=True, xlabel="Epoch", ylabel="ACC"
+    )
+
+    plt.ylim(acc_ylim)
+    if save_acc is not None:
+        plt.savefig(save_acc)
